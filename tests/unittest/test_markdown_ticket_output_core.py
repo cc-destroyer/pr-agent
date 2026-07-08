@@ -150,11 +150,25 @@ class TestConvertToMarkdownV2Branches:
         )
         assert "<strong>No major issues detected</strong>" in out
 
+    def test_key_issues_empty_list_block_scalar_gfm(self):
+        out = convert_to_markdown_v2(
+            {"review": {"key_issues_to_review": "[]"}}
+        )
+        assert "<strong>No major issues detected</strong>" in out
+        assert "Recommended focus areas for review" not in out
+
     def test_key_issues_no_major_issues_non_gfm(self):
         out = convert_to_markdown_v2(
             {"review": {"key_issues_to_review": "No"}}, gfm_supported=False
         )
         assert "### ⚡ No major issues detected" in out
+
+    def test_key_issues_invalid_entries_do_not_render_empty_focus_area(self):
+        out = convert_to_markdown_v2(
+            {"review": {"key_issues_to_review": ["...", {}]}}
+        )
+        assert "<strong>No major issues detected</strong>" in out
+        assert "Recommended focus areas for review" not in out
 
     def test_key_issues_possible_bug_header_softened(self):
         mock_provider = Mock()

@@ -125,6 +125,45 @@ def unique_strings(input_list: List[str]) -> List[str]:
     return unique_list
 
 
+def is_valid_key_issue(issue) -> bool:
+    if not isinstance(issue, dict) or not issue:
+        return False
+    required_text_fields = ("relevant_file", "issue_header", "issue_content")
+    if not all(str(issue.get(field, "")).strip() for field in required_text_fields):
+        return False
+    try:
+        int(str(issue.get("start_line", "")).strip())
+        int(str(issue.get("end_line", "")).strip())
+    except ValueError:
+        return False
+    return True
+
+
+def normalize_key_issues(value) -> list[dict]:
+    """
+    Normalize model output for key_issues_to_review.
+
+    Models occasionally return an empty list as a block scalar (`| []`), which
+    YAML parses as a non-empty string and otherwise renders an empty issues row.
+    """
+    if is_value_no(value):
+        return []
+    if isinstance(value, dict):
+        return [value] if is_valid_key_issue(value) else []
+    if isinstance(value, list):
+        return [issue for issue in value if is_valid_key_issue(issue)]
+    if isinstance(value, str):
+        try:
+            parsed_value = yaml.safe_load(value.strip())
+        except yaml.YAMLError:
+            return []
+        if isinstance(parsed_value, dict):
+            return [parsed_value] if is_valid_key_issue(parsed_value) else []
+        if isinstance(parsed_value, list):
+            return [issue for issue in parsed_value if is_valid_key_issue(issue)]
+    return []
+
+
 def convert_to_markdown_v2(output_data: dict,
                            gfm_supported: bool = True,
                            incremental_review=None,
@@ -259,8 +298,8 @@ def convert_to_markdown_v2(output_data: dict,
                 markdown_text += process_can_be_split(emoji, value)
                 markdown_text += f"</td></tr>\n"
         elif 'key issues to review' in key_nice.lower():
-            # value is a list of issues
-            if is_value_no(value):
+            issues = normalize_key_issues(value)
+            if not issues:
                 if gfm_supported:
                     markdown_text += f"<tr><td>"
                     markdown_text += f"{emoji}&nbsp;<strong>No major issues detected</strong>"
@@ -268,7 +307,6 @@ def convert_to_markdown_v2(output_data: dict,
                 else:
                     markdown_text += f"### {emoji} No major issues detected\n\n"
             else:
-                issues = value
                 if gfm_supported:
                     markdown_text += f"<tr><td>"
                     # markdown_text += f"{emoji}&nbsp;<strong>{key_nice}</strong><br><br>\n\n"
