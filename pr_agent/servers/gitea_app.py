@@ -1,7 +1,7 @@
 import copy
 import os
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 from starlette.background import BackgroundTasks
@@ -77,7 +77,7 @@ async def handle_request(body: Dict[str, Any], event: str):
             return {}
         if action in ["opened", "reopened", "synchronized"]:
             await handle_pr_event(body, event, action, agent)
-    elif event == "issue_comment":
+    elif event in ["issue_comment", "pull_request_comment"]:
         if action == "created":
             await handle_comment_event(body, event, action, agent)
 
@@ -121,11 +121,31 @@ async def handle_comment_event(body: Dict[str, Any], event: str, action: str, ag
     if not comment_body or not comment_body.startswith("/"):
         return
 
-    pr_url = body.get("pull_request", {}).get("url")
+    pr_url = _get_comment_pr_url(body)
     if not pr_url:
+        get_logger().debug("Ignoring comment event: no PR URL found")
         return
 
     await agent.handle_request(pr_url, comment_body)
+
+def _get_comment_pr_url(body: Dict[str, Any]) -> Optional[str]:
+    """Return a PR URL from the different shapes Gitea uses for PR comments."""
+    pr_url = body.get("pull_request", {}).get("url")
+    if pr_url:
+        return pr_url
+
+    comment = body.get("comment", {})
+    pr_url = comment.get("pull_request_url")
+    if pr_url:
+        return pr_url
+
+    if body.get("is_pull"):
+        issue = body.get("issue", {})
+        html_url = issue.get("html_url")
+        if html_url and "/pulls/" in html_url:
+            return html_url
+
+    return None
 
 async def _perform_commands_gitea(commands_conf: str, agent: PRAgent, body: dict, api_url: str):
     apply_repo_settings(api_url)
