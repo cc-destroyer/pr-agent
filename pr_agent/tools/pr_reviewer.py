@@ -72,6 +72,7 @@ from pr_agent.tools.ticket_pr_compliance_check import (
 
 MAX_REVIEW_COVERAGE_FILES = 50
 _SUGGESTION_FENCE_RE = re.compile(r"```[ \t]*suggestion\b", re.IGNORECASE)
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
 _REVIEW_FAILURE_REASONS = (
     (
@@ -237,6 +238,7 @@ class PRReviewer:
             'require_todo_scan': get_settings().pr_reviewer.get("require_todo_scan", False),
             'question_str': question_str,
             'answer_str': answer_str,
+            "pr_discussion": self._get_pr_discussion(),
             "extra_instructions": get_settings().pr_reviewer.extra_instructions,
             "skills_context": get_skills_context(),
             "repo_context": build_repo_context(self.git_provider),
@@ -1440,6 +1442,52 @@ class PRReviewer:
                     break
 
         return question_str, answer_str
+
+    def _get_pr_discussion(self) -> str:
+        """
+        Collect the PR's conversation comments for the prompt, so the model can see which earlier
+        findings were fixed or answered and does not raise them again.
+
+        Returns:
+            The comments oldest-first as "author:\\nbody" entries, keeping the newest ones that fit in
+            pr_reviewer.max_pr_discussion_chars, or "" when disabled or unavailable.
+        """
+        if not _as_bool(get_settings().pr_reviewer.get("include_pr_discussion", False)):
+            return ""
+        try:
+            max_chars = int(get_settings().pr_reviewer.get("max_pr_discussion_chars", 40000))
+        except (TypeError, ValueError):
+            max_chars = 0
+        if max_chars <= 0 or not self.git_provider.is_supported("get_issue_comments"):
+            return ""
+        try:
+            comments = list(self.git_provider.get_issue_comments())
+        except Exception as e:
+            get_logger().warning(f"Failed to load the PR discussion for /review: {e}")
+            return ""
+
+        entries = []
+        for comment in comments:
+            body = getattr(comment, "body", None)
+            if not isinstance(body, str):
+                continue
+            # hidden markers (review identity, finding state) are bookkeeping, not discussion
+            body = _HTML_COMMENT_RE.sub("", body).strip()
+            if not body:
+                continue
+            author = getattr(getattr(comment, "user", None), "login", None) or "unknown"
+            entries.append(f"{author}:\n{body}")
+
+        kept = []
+        used = 0
+        for entry in reversed(entries):
+            if used + len(entry) > max_chars:
+                if not kept:
+                    kept.append(entry[:max_chars])
+                break
+            kept.append(entry)
+            used += len(entry)
+        return "\n\n-----\n\n".join(reversed(kept))
 
     def _can_run_incremental_review(self) -> bool:
         """

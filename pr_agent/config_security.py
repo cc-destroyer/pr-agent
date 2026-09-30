@@ -93,7 +93,8 @@ CLI_HOST_ONLY_KEYS_BY_SECTION = {
 # to make /improve demand a checklist and then auto-approve the pull request when the
 # author ticks it. Thread-history collection (pr_questions.use_conversation_history) is
 # also root-controlled so a nested file cannot re-enable sending private review-thread
-# discussion bodies to the model after the operator opted out.
+# discussion bodies to the model after the operator opted out, and for the same reason
+# so is /review's PR discussion (include_pr_discussion and its max_pr_discussion_chars budget).
 # Similarly, budget/call-count controls (max_number_of_calls, max_ai_calls, parallel_calls,
 # enable_large_pr_chunking, enable_large_pr_handling, async_ai_calls) are restricted so
 # a nested file cannot multiply AI calls independently of the host-trusted defaults.
@@ -103,6 +104,7 @@ PER_DIRECTORY_HOST_ONLY_KEYS_BY_SECTION = {
         "inline_key_issues", "enable_review_labels_security",
         "enable_review_labels_effort", "require_estimate_effort_to_review",
         "require_security_review", "require_ticket_analysis_review",
+        "include_pr_discussion", "max_pr_discussion_chars",
     }),
     "pr_description": frozenset({
         "publish_labels", "enable_large_pr_handling", "max_ai_calls", "async_ai_calls",

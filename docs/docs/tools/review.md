@@ -121,6 +121,14 @@ for the authoritative default values.
     <td>Maximum number of returned findings.</td>
   </tr>
   <tr>
+    <td><b>include_pr_discussion</b></td>
+    <td>If set to true, the PR's conversation comments (earlier reviews and the replies to them) are included in the prompt, so a finding that was already fixed, or answered with a reason it does not apply, is not raised again. Nested per-directory settings files cannot enable it. Default is false.</td>
+  </tr>
+  <tr>
+    <td><b>max_pr_discussion_chars</b></td>
+    <td>Character budget for the PR discussion when <code>include_pr_discussion</code> is true. The newest comments are kept. Default is 40000; 0 disables it.</td>
+  </tr>
+  <tr>
     <td><b>inline_key_issues</b></td>
     <td>If set to true, each key issue is published as an inline comment where the provider supports verified inline-comment publication (GitHub, Bitbucket Cloud, Azure DevOps, GitLab). A finding leaves the review summary when a matching comment exists or the provider accepts the new comment. Findings that cannot be anchored or published stay in the summary.</td>
   </tr>

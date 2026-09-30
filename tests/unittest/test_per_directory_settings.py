@@ -648,6 +648,8 @@ enable_review_labels_effort = false
 require_security_review = false
 require_estimate_effort_to_review = false
 require_ticket_analysis_review = false
+include_pr_discussion = true
+max_pr_discussion_chars = 999999
 
 [pr_description]
 publish_labels = true
@@ -734,6 +736,9 @@ skip_comments = true
         # Thread-history collection for /ask is root-controlled: a nested file cannot
         # re-enable sending private review-thread discussion bodies to the model.
         assert get_settings().pr_questions.use_conversation_history is False
+        # Likewise for /review: a nested file cannot start sending the PR discussion to the model.
+        assert get_settings().pr_reviewer.include_pr_discussion is False
+        assert get_settings().pr_reviewer.max_pr_discussion_chars != 999999
         # Ordinary keys in the same sections still apply.
         assert get_settings().pr_reviewer.num_max_findings == 4
         assert get_settings().pr_description.use_ai_title is True

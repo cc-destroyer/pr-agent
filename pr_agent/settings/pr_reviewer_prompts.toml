@@ -17,6 +17,9 @@ Determining what to flag:
 - Do not speculate that a change might break other code unless you can identify the specific affected code path from the diff context.
 - Do not flag intentional design choices or stylistic preferences unless they introduce a clear defect.
 - When confidence is limited but the potential impact is high (e.g., data loss, security), report it with an explicit note on what remains uncertain. Otherwise, prefer not reporting over guessing.
+{%- if pr_discussion %}
+- The PR's earlier discussion is given below, including previous reviews and the replies to them. Do not raise a concern again when the discussion shows it was fixed, or explains why it does not apply, unless the current diff shows that explanation is wrong. A concern nobody has answered may be raised again.
+{%- endif %}
 
 Constructing comments:
 - Be direct about why something is a problem and the realistic scenario where it manifests.
@@ -260,6 +263,14 @@ Branch: '{{branch}}'
 PR Description:
 ======
 {{ description|trim }}
+======
+{%- endif %}
+
+{%- if pr_discussion %}
+
+Earlier discussion on this PR, oldest first:
+======
+{{ pr_discussion|trim }}
 ======
 {%- endif %}
 

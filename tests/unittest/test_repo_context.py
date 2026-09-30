@@ -1675,6 +1675,7 @@ def test_github_provider_reads_from_default_branch_when_requested():
                 "require_score": False,
                 "require_tests": True,
                 "question_str": "",
+                "pr_discussion": "",
                 "require_security_review": True,
                 "require_todo_scan": False,
                 "require_estimate_effort_to_review": True,

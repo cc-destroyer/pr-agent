@@ -165,6 +165,8 @@ to-do list.
 | `inline_key_issues` | false | Publish each review finding as an inline comment where the provider can verify inline-comment publication (GitHub, Bitbucket Cloud, Azure DevOps, GitLab). |
 | `extra_instructions` | "" |  |
 | `num_max_findings` | 3 |  |
+| `include_pr_discussion` | false | Give /review the PR's conversation comments (earlier reviews and the replies to them), so a finding that was already fixed or answered is not raised again. |
+| `max_pr_discussion_chars` | 40000 | Character budget for that conversation; the newest comments are kept. 0 disables it. |
 | `final_update_message` | true |  |
 **review labels**
 
