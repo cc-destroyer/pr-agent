@@ -1,8 +1,13 @@
+---
+title: "GitHub Integration"
+sidebar_position: 4
+---
+
 In this page we will cover how to install and run PR-Agent as a GitHub Action or GitHub App, and how to configure it for your needs.
 
 ## Run as a GitHub Action
 
-You can use our pre-built Github Action Docker image to run PR-Agent as a Github Action.
+You can use our pre-built GitHub Action Docker image to run PR-Agent as a GitHub Action.
 
 1) Add the following file to your repository under `.github/workflows/pr_agent.yml`:
 
@@ -49,16 +54,16 @@ When you open your next PR, you should see a comment from `github-actions` bot w
         # ... previous environment values
         OPENAI.ORG: "<Your organization name under your OpenAI account>"
         PR_REVIEWER.REQUIRE_TESTS_REVIEW: "false" # Disable tests review
-        PR_CODE_SUGGESTIONS.NUM_CODE_SUGGESTIONS: 6 # Increase number of code suggestions
+        PR_CODE_SUGGESTIONS.NUM_CODE_SUGGESTIONS_PER_CHUNK: 6 # Increase number of code suggestions
 ```
 
 See detailed usage instructions in the [USAGE GUIDE](../usage-guide/automations_and_usage.md#github-action)
 
 #### Using with pull_request_target (fork/contribution support)
 
-By default, the `pull_request` event does not have access to repository secrets when the PR originates from a forked repository, which means PR-Agent won't be able to access your `OPENAI_KEY` and `GITHUB_TOKEN` secrets.
+By default, the `pull_request` event does not have access to repository or organization secrets when the PR originates from a forked repository, which means PR-Agent won't be able to access secrets such as `OPENAI_KEY`. The workflow still receives a `GITHUB_TOKEN`, but it has read-only permissions for fork pull requests by default. For private repositories, administrators can enable **Send secrets to workflows from pull requests** to make secrets available, but doing so exposes those secrets to workflows triggered by fork pull requests.
 
-To support PRs from external contributors (forks), use the `pull_request_target` event instead. This event runs in the context of the base repository and has access to secrets, while the PR code is checked out manually with `actions/checkout`.
+To support PRs from external contributors (forks), use the `pull_request_target` event instead. This event runs in the context of the base repository and has access to its secrets and `GITHUB_TOKEN` permissions. PR-Agent uses the GitHub API to fetch PR data and does not require a local checkout of the PR code.
 
 ```yaml
 name: PR Agent
@@ -83,11 +88,13 @@ jobs:
           github_action_config.pr_actions: '["opened", "reopened", "synchronize", "ready_for_review", "review_requested"]'
 ```
 
-!!! tip "No local checkout needed"
-    PR-Agent uses the GitHub API to fetch PR data directly from the event payload — it does not require a local checkout of the PR code. This means you can safely omit the `actions/checkout` step entirely, avoiding common pitfalls with `pull_request_target` like the `issue_comment` event lacking a `pull_request.head.sha` ref.
+:::tip[No local checkout needed]
+PR-Agent uses the GitHub API to fetch PR data directly from the event payload — it does not require a local checkout of the PR code. This means you can safely omit the `actions/checkout` step entirely, avoiding common pitfalls with `pull_request_target` like the `issue_comment` event lacking a `pull_request.head.sha` ref.
+:::
 
-!!! warning "Security considerations"
-    Using `pull_request_target` gives the workflow access to repository secrets. Unlike the `pull_request` event, the PR code is not automatically checked out, which is a security feature. Avoid adding an `actions/checkout` step unless you have a specific need for the local files — if you do add one, review the [GitHub security guide on pull_request_target](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target).
+:::warning[Security considerations]
+Using `pull_request_target` gives the workflow access to repository secrets. Neither event checks out code on its own, but under `pull_request_target` a plain `actions/checkout` fetches the default branch rather than the pull request, which is a security feature. Checking out the pull request head alone does not execute untrusted code, but do not build, test, install, or otherwise execute that content in the same job with secrets or elevated token permissions. If local files are required, review the [GitHub security guide on pull_request_target](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target) before checking out the pull request head.
+:::
 
 ### Configuration Examples
 
@@ -144,8 +151,8 @@ jobs:
         uses: the-pr-agent/pr-agent@main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          config.model: "gemini/gemini-1.5-flash"
-          config.fallback_models: '["gemini/gemini-1.5-flash"]'
+          config.model: "gemini/gemini-3.8-flash"
+          config.fallback_models: '["gemini/gemini-3.8-flash"]'
           GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "true"
@@ -175,8 +182,8 @@ jobs:
         uses: the-pr-agent/pr-agent@main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          config.model: "anthropic/claude-3-opus-20240229"
-          config.fallback_models: '["anthropic/claude-3-haiku-20240307"]'
+          config.model: "anthropic/claude-opus-5"
+          config.fallback_models: '["anthropic/claude-haiku-4-5-20251001"]'
           ANTHROPIC.KEY: ${{ secrets.ANTHROPIC_KEY }}
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "true"
@@ -226,8 +233,8 @@ To use Gemini models instead of the default OpenAI models:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Set the model to Gemini
-        config.model: "gemini/gemini-1.5-flash"
-        config.fallback_models: '["gemini/gemini-1.5-flash"]'
+        config.model: "gemini/gemini-3.8-flash"
+        config.fallback_models: '["gemini/gemini-3.8-flash"]'
         # Add your Gemini API key
         GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         # Tool configuration
@@ -250,8 +257,8 @@ To use Claude models:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Set the model to Claude
-        config.model: "anthropic/claude-3-opus-20240229"
-        config.fallback_models: '["anthropic/claude-3-haiku-20240307"]'
+        config.model: "anthropic/claude-opus-5"
+        config.fallback_models: '["anthropic/claude-haiku-4-5-20251001"]'
         # Add your Anthropic API key
         ANTHROPIC.KEY: ${{ secrets.ANTHROPIC_KEY }}
         # Tool configuration
@@ -345,6 +352,13 @@ When the GitHub Actions runner is on AWS infrastructure (EC2, ECS, EKS), use the
 
 The IAM role must have `bedrock:InvokeModel` on the target model ARN. See [Bedrock model configuration](../usage-guide/changing_a_model.md#amazon-bedrock) for the full IAM policy example and supported models.
 
+To route calls through a VPC interface endpoint, add `AWS_BEDROCK_RUNTIME_ENDPOINT` alongside the credentials above:
+
+```yaml
+      env:
+        AWS_BEDROCK_RUNTIME_ENDPOINT: "https://bedrock-runtime.us-east-1.amazonaws.com"
+```
+
 #### Advanced Configuration Options
 
 ##### Custom Review Instructions
@@ -373,7 +387,7 @@ Configure for specific programming languages:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Language-specific settings
         pr_reviewer.extra_instructions: "Focus on Python best practices, type hints, and docstrings."
-        pr_code_suggestions.num_code_suggestions: "8"
+        pr_code_suggestions.num_code_suggestions_per_chunk: "8"
         pr_code_suggestions.suggestions_score_threshold: "7"
         # Tool configuration
         github_action_config.auto_review: "true"
@@ -397,6 +411,47 @@ Run only specific tools automatically:
         github_action_config.pr_actions: '["opened", "reopened"]'
 ```
 
+##### CI artifact context
+
+A file produced by an earlier CI step — a test report, a coverage summary, a linter or SAST output — can be injected into the prompts of `/review`, `/describe` and `/improve`, so the model reviews the PR with your pipeline's own findings in hand.
+
+Point the action at the file with the `artifact_path` input. The path is resolved relative to `GITHUB_WORKSPACE` (an absolute path also works), so the file must already exist in the workspace when PR-Agent runs — produce it in a previous step, or download it with `actions/download-artifact`:
+
+```yaml
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: pytest --junitxml=reports/pytest.xml || true
+      - name: PR Agent action step
+        uses: the-pr-agent/pr-agent@main
+        env:
+          OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          artifact_path: reports/pytest.xml
+          artifact_instructions: "These are the failing tests from this PR's CI run. Call out any suggestion that would not fix them."
+```
+
+Setting `artifact_path` turns the feature on by itself; there is no separate enable switch to flip in the workflow. The file contents are wrapped in a labelled `CI Artifact` block and appended to the `extra_instructions` of each target tool.
+
+The remaining knobs live in the `[artifacts]` section of your configuration:
+
+```toml
+[artifacts]
+enable = false                                              # auto-enabled when artifact_path is set
+artifact_path = ""                                          # relative to GITHUB_WORKSPACE, or absolute
+artifact_instructions = ""                                  # empty = a generic "treat this as CI context" instruction
+artifact_label = ""                                         # empty = the file's name
+target_tools = ["pr_reviewer", "pr_description", "pr_code_suggestions"]
+max_artifact_size = 50000                                   # characters; longer files are truncated with a marker
+```
+
+:::note
+A path that resolves outside `GITHUB_WORKSPACE` is rejected, and a missing or unreadable file is skipped with a warning — in both cases the tools still run, just without the artifact context.
+:::
+
+The same settings apply when PR-Agent runs as a CLI from another CI system, with `ARTIFACT_PATH` set in the job's environment; see the [GitLab pipeline example](./gitlab.md#ci-artifact-context).
+
 #### Using Configuration Files
 
 Instead of setting all options via environment variables, you can use a `.pr_agent.toml` file in your repository root:
@@ -405,14 +460,14 @@ Instead of setting all options via environment variables, you can use a `.pr_age
 
 ```toml
 [config]
-model = "gemini/gemini-1.5-flash"
-fallback_models = ["anthropic/claude-3-opus-20240229"]
+model = "gemini/gemini-3.8-flash"
+fallback_models = ["anthropic/claude-opus-5"]
 
 [pr_reviewer]
 extra_instructions = "Focus on security issues and code quality."
 
 [pr_code_suggestions]
-num_code_suggestions = 6
+num_code_suggestions_per_chunk = 6
 suggestions_score_threshold = 7
 ```
 
@@ -451,7 +506,7 @@ jobs:
 
 If you get model not found errors:
 
-1. **Check model name format**: Ensure you're using the correct model identifier format (e.g., `gemini/gemini-1.5-flash`, not just `gemini-1.5-flash`)
+1. **Check model name format**: Ensure you're using the correct model identifier format (e.g., `gemini/gemini-3.8-flash`, not just `gemini-3.8-flash`)
 
 2. **Verify API keys**: Make sure your API keys are correctly set as repository secrets
 
@@ -475,7 +530,7 @@ If you encounter rate limiting:
         OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # Add a fallback model for better reliability
-        config.fallback_models: '["gpt-5.4-mini"]'
+        config.fallback_models: '["your-fallback-model"]'
         # Increase timeout for slower models
         config.ai_timeout: "300"
         github_action_config.auto_review: "true"
@@ -510,6 +565,12 @@ If you encounter rate limiting:
     pull-requests: write
   ```
   See the [Restricted Mode guide](../usage-guide/additional_configurations.md#restricted-mode) for details.
+
+**Error: "PR-Agent command was not run" for incomplete GitHub files**
+- **Cause**: GitHub limits pull-request changed-file responses to 3,000 files. A mismatch can also occur when GitHub
+  returns inconsistent file-count metadata.
+- **Solution**: If the pull request changes more than 3,000 files, split it into smaller pull requests and run the
+  command again. Otherwise, retry the command.
 
 **Error: "Invalid JSON format"**
 
@@ -558,45 +619,47 @@ For more detailed configuration options, see:
 
 ### Using a specific release
 
-!!! tip ""
-    if you want to pin your action to a specific release (v0.34.2 for example) for stability reasons, use:
-    ```yaml
-    ...
-        steps:
-          - name: PR Agent action step
-            id: pragent
-            uses: docker://pragent/pr-agent:0.34.2-github_action
-    ...
-    ```
+:::tip
+if you want to pin your action to a specific release (v0.41.0 for example) for stability reasons, use:
+```yaml
+...
+    steps:
+      - name: PR Agent action step
+        id: pragent
+        uses: docker://pragent/pr-agent:0.41.0-github_action
+...
+```
 
-    For enhanced security, you can also specify the Docker image by its [digest](https://hub.docker.com/repository/docker/pragent/pr-agent/tags):
-    ```yaml
-    ...
-        steps:
-          - name: PR Agent action step
-            id: pragent
-            uses: docker://pragent/pr-agent@sha256:a0b36966ca3a197ca739fa1e65c16703076fc1c744cd423ca203b8c21707d71c
-    ...
-    ```
+For enhanced security, you can also specify the Docker image by its [digest](https://hub.docker.com/r/pragent/pr-agent/tags). Resolve the digest for the version you are pinning with `docker buildx imagetools inspect pragent/pr-agent:0.41.0-github_action --format '{{.Manifest.Digest}}'`, then use it in place of the tag:
+```yaml
+...
+    steps:
+      - name: PR Agent action step
+        id: pragent
+        uses: docker://pragent/pr-agent@sha256:<digest>
+...
+```
 
-    Official Docker Hub release images also publish GitHub Artifact Attestations, so you can verify that a pinned digest was built from this repository before using it:
-    ```sh
-    gh attestation verify \
-      "oci://index.docker.io/pragent/pr-agent@sha256:<digest>" \
-      --repo The-PR-Agent/pr-agent
-    ```
+Official Docker Hub release images also publish GitHub Artifact Attestations, so you can verify that a pinned digest was built from this repository before using it:
+```sh
+gh attestation verify \
+  "oci://index.docker.io/pragent/pr-agent@sha256:<digest>" \
+  --repo The-PR-Agent/pr-agent
+```
+:::
 
 ### Action for GitHub enterprise server
 
-!!! tip ""
-    To use the action with a GitHub enterprise server, add an environment variable `GITHUB__BASE_URL` with the API URL of your GitHub server.
+:::tip
+To use the action with a GitHub enterprise server, add an environment variable `GITHUB__BASE_URL` with the API URL of your GitHub server.
 
-    For example, if your GitHub server is at `https://github.mycompany.com`, add the following to your workflow file:
-    ```yaml
-          env:
-            # ... previous environment values
-            GITHUB__BASE_URL: "https://github.mycompany.com/api/v3"
-    ```
+For example, if your GitHub server is at `https://github.mycompany.com`, add the following to your workflow file:
+```yaml
+      env:
+        # ... previous environment values
+        GITHUB__BASE_URL: "https://github.mycompany.com/api/v3"
+```
+:::
 
 ---
 
@@ -604,19 +667,28 @@ For more detailed configuration options, see:
 
 Allowing you to automate the review process on your private or public repositories.
 
-1) Create a GitHub App from the [Github Developer Portal](https://docs.github.com/en/developers/apps/creating-a-github-app).
+1) Create a GitHub App from the [GitHub Developer Portal](https://docs.github.com/en/developers/apps/creating-a-github-app).
 
    - Set the following permissions:
      - Pull requests: Read & write
      - Issue comment: Read & write
      - Metadata: Read-only
-     - Contents: Read-only
+     - Contents: Read-only (or Read & write if using `resolve_threads` — see note below)
    - Set the following events:
      - Issue comment
      - Pull request
+     - Pull request review
      - Push (if you need to enable triggering on PR update)
+     - Pull request review comment (required for `/ask` on review threads)
 
-2) Generate a random secret for your app, and save it for later. For example, you can use:
+   > **Note:** If you enable `pr_questions.resolve_threads`, the GitHub App requires **Contents: Read & write** permission. GitHub's `resolveReviewThread` GraphQL mutation is gated behind the Contents permission, even though it only modifies PR thread metadata. See [GitHub community discussion](https://github.com/orgs/community/discussions/204269) for details.
+   >
+   > **Important:** When enabled, the LLM may resolve threads started by
+   > human reviewers — not only bot-generated threads. Use this setting
+   > only when your team is comfortable with AI-driven thread resolution.
+   > The feature is opt-in and defaults to off.
+
+2) Generate a random secret for your app, and save it for later. The webhook secret is required: if `GITHUB.WEBHOOK_SECRET` is not configured, the server rejects every incoming webhook with HTTP 403. For example, you can use:
 
 ```bash
 WEBHOOK_SECRET=$(python -c "import secrets; print(secrets.token_hex(10))")
@@ -643,12 +715,11 @@ cp pr_agent/settings/.secrets_template.toml pr_agent/settings/.secrets.toml
 - Your OpenAI key.
 - Copy your app's private key to the private_key field.
 - Copy your app's ID to the app_id field.
-- Copy your app's webhook secret to the webhook_secret field.
+- Copy your app's webhook secret to the webhook_secret field (required).
 - Set deployment_type to 'app' in [configuration.toml](https://github.com/the-pr-agent/pr-agent/blob/main/pr_agent/settings/configuration.toml)
 
-    > The .secrets.toml file is not copied to the Docker image by default, and is only used for local development.
-    > If you want to use the .secrets.toml file in your Docker image, you can add remove it from the .dockerignore file.
-    > In most production environments, you would inject the secrets file as environment variables or as mounted volumes.
+    > The local `.secrets.toml` file is excluded from the Docker build context. Never bake secrets into a container image.
+    > For container deployments, provide secrets at runtime through environment variables or a mounted secret volume.
     > For example, in order to inject a secrets file as a volume in a Kubernetes environment you can update your pod spec to include the following,
     > assuming you have a secret named `pr-agent-settings` with a key named `.secrets.toml`:
 
@@ -670,8 +741,11 @@ cp pr_agent/settings/.secrets_template.toml pr_agent/settings/.secrets.toml
 6) Build a Docker image for the app and optionally push it to a Docker repository. We'll use Dockerhub as an example:
 
     ```bash
-    docker build . -t pragent/pr-agent:github_app --target github_app -f docker/Dockerfile
-    docker push pragent/pr-agent:github_app  # Push to your Docker repository
+    docker build . -t pr-agent:github_app --target github_app -f docker/Dockerfile
+
+    # Optional, to push it to your own Docker repository:
+    docker tag pr-agent:github_app <your-registry>/pr-agent:github_app
+    docker push <your-registry>/pr-agent:github_app
     ```
 
 7. Host the app using a server, serverless function, or container environment. Alternatively, for development and
@@ -684,6 +758,8 @@ cp pr_agent/settings/.secrets_template.toml pr_agent/settings/.secrets.toml
    - Webhook secret: The secret you generated earlier.
 
 9. Install the app by navigating to the "Install App" tab and selecting your desired repositories.
+
+10. The app runs under gunicorn with multiple worker processes. See [Sizing a self-hosted webhook server](./index.md#sizing-a-self-hosted-webhook-server) for the `GUNICORN_WORKERS` / `GUNICORN_MAX_WORKERS` knobs and memory guidance — worth reading before setting a memory limit.
 
 > **Note:** When running PR-Agent from GitHub app, the default configuration file (configuration.toml) will be loaded.
 > However, you can override the default tool parameters by uploading a local configuration file `.pr_agent.toml`
@@ -703,7 +779,7 @@ For example: `GITHUB.WEBHOOK_SECRET` --> `GITHUB__WEBHOOK_SECRET`
 2. Build a docker image that can be used as a lambda function
 
     ```shell
-    docker buildx build --platform=linux/amd64 . -t pragent/pr-agent:github_lambda --target github_lambda -f docker/Dockerfile.lambda
+    docker buildx build --platform=linux/amd64 . -t pr-agent:github_lambda --target github_lambda -f docker/Dockerfile.lambda
    ```
    (Note: --target github_lambda is optional as it's the default target)
 
@@ -711,8 +787,8 @@ For example: `GITHUB.WEBHOOK_SECRET` --> `GITHUB__WEBHOOK_SECRET`
 3. Push image to ECR
 
     ```shell
-    docker tag pragent/pr-agent:github_lambda <AWS_ACCOUNT>.dkr.ecr.<AWS_REGION>.amazonaws.com/pragent/pr-agent:github_lambda
-    docker push <AWS_ACCOUNT>.dkr.ecr.<AWS_REGION>.amazonaws.com/pragent/pr-agent:github_lambda
+    docker tag pr-agent:github_lambda <AWS_ACCOUNT>.dkr.ecr.<AWS_REGION>.amazonaws.com/pr-agent:github_lambda
+    docker push <AWS_ACCOUNT>.dkr.ecr.<AWS_REGION>.amazonaws.com/pr-agent:github_lambda
     ```
 
 4. Create a lambda function that uses the uploaded image. Set the lambda timeout to be at least 3m.
@@ -747,7 +823,7 @@ CONFIG__SECRET_PROVIDER=aws_secrets_manager
 
 ### AWS CodeCommit Setup
 
-Not all features have been added to CodeCommit yet.  As of right now, CodeCommit has been implemented to run the PR-Agent CLI on the command line, using AWS credentials stored in environment variables.  (More features will be added in the future.)  The following is a set of instructions to have PR-Agent do a review of your CodeCommit pull request from the command line:
+Not all features have been added to CodeCommit yet.  As of right now, CodeCommit has been implemented to run the PR-Agent CLI on the command line, using AWS credentials stored in environment variables.  CodeCommit pull requests with multiple targets are reviewed across every target repository and commit comparison; single-target pull requests keep the same behavior.  The following is a set of instructions to have PR-Agent do a review of your CodeCommit pull request from the command line:
 
 1. Create an IAM user that you will use to read CodeCommit pull requests and post comments
     - Note: That user should have CLI access only, not Console access
@@ -785,6 +861,7 @@ Example IAM permissions to that user to allow access to CodeCommit:
                 "codecommit:List*",
                 "codecommit:PostComment*",
                 "codecommit:PutCommentReaction",
+                "codecommit:UpdateComment",
                 "codecommit:UpdatePullRequestDescription",
                 "codecommit:UpdatePullRequestTitle"
             ],

@@ -1,5 +1,5 @@
+import tomllib  #tomllib should be used instead of Py toml for Python 3.11+
 from pathlib import Path
-import tomllib #tomllib should be used instead of Py toml for Python 3.11+
 
 from jinja2.exceptions import SecurityError
 
@@ -19,10 +19,10 @@ def load(obj, env=None, silent=True, key=None, filename=None):
     - Supports Dynaconf's fresh_vars feature for dynamic reloading.
     Args:
         obj: The Dynaconf settings instance to update.
-        env: The current environment name (upper case). Defaults to 'DEVELOPMENT'. Note: currently unused.
+        env: Unused compatibility parameter. Defaults to None.
         silent (bool): If True, suppress exceptions and log warnings/errors instead.
         key (str | None): Load only this top-level key (section) if provided; otherwise, load all keys from the files.
-        filename (str | None): Custom filename for tests (not used when settings_files are provided).
+        filename (str | None): Unused compatibility parameter. Settings files come from the Dynaconf object.
     Returns:
         None
     """
@@ -32,8 +32,10 @@ def load(obj, env=None, silent=True, key=None, filename=None):
     settings_files = obj.settings_files if hasattr(obj, 'settings_files') else (
         obj.settings_file) if hasattr(obj, 'settings_file') else []
     if not settings_files or not isinstance(settings_files, list):
-        get_logger().warning("No settings files specified, or missing keys "
-                             "(tried looking for 'settings_files' or 'settings_file'), or not a list. Skipping loading.",
+        get_logger().warning(
+                             "No settings files specified, or missing keys "
+                             "(tried looking for 'settings_files' or 'settings_file'), "
+                             "or not a list. Skipping loading.",
                              artifact={'toml_obj_attributes_names': dir(obj)})
         return
 
@@ -66,7 +68,10 @@ def load(obj, env=None, silent=True, key=None, filename=None):
                 continue
 
             if file_path.stat().st_size > MAX_TOML_SIZE_IN_BYTES:
-                get_logger().warning(f"Settings file too large (> {MAX_TOML_SIZE_IN_BYTES} bytes): {settings_file}. Skipping it.")
+                get_logger().warning(
+                    f"Settings file too large (> {MAX_TOML_SIZE_IN_BYTES} bytes): {settings_file}. "
+                    f"Skipping it."
+                )
                 continue
 
             with open(file_path, 'rb') as f:
@@ -161,7 +166,8 @@ def validate_file_security(file_data, filename):
             if key.lower() in forbidden_keys_to_reasons:
                 raise SecurityError(
                     f"Security error in {filename}: "
-                    f"Forbidden directive '{key}' found at {full_path}. Reason: {forbidden_keys_to_reasons[key.lower()]}"
+                    f"Forbidden directive '{key}' found at {full_path}. "
+                    f"Reason: {forbidden_keys_to_reasons[key.lower()]}"
                 )
 
             # Recursively check nested dicts

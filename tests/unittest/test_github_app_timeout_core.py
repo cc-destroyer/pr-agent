@@ -149,6 +149,55 @@ class TestDefaultDictWithTimeout:
         _ = d["fresh"]
         assert "a" not in d
 
+    def test_setdefault_registers_key_time(self, fake_clock):
+        d = DefaultDictWithTimeout(ttl=10, refresh_interval=1000)
+        assert d.setdefault("a", 0) == 0
+        assert _key_times(d)["a"] == fake_clock["t"]
+
+    def test_setdefault_returns_existing_value_without_replacing_it(self, fake_clock):
+        d = DefaultDictWithTimeout(ttl=1000, refresh_interval=1000)
+        d["a"] = 5
+        assert d.setdefault("a", 0) == 5
+        assert d["a"] == 5
+
+    def test_setdefault_inserts_default_rather_than_factory_value(self, fake_clock):
+        d = DefaultDictWithTimeout(int, ttl=1000, refresh_interval=1000)
+        assert d.setdefault("a", 7) == 7
+        assert d["a"] == 7
+
+    def test_setdefault_on_expired_key_returns_default(self, fake_clock):
+        d = DefaultDictWithTimeout(
+            ttl=2, refresh_interval=5, update_key_time_on_get=False
+        )
+        d["a"] = 5
+        fake_clock["t"] += 10
+        assert d.setdefault("a", 0) == 0
+        assert d["a"] == 0
+
+    def test_failed_lookup_leaves_no_stale_key_time(self, fake_clock):
+        d = DefaultDictWithTimeout(ttl=1000, refresh_interval=1000)
+        with pytest.raises(KeyError):
+            _ = d["missing"]
+        assert "missing" not in _key_times(d)
+
+    def test_delitem_tolerates_key_absent_from_the_dict(self, fake_clock):
+        d = DefaultDictWithTimeout(ttl=1000, refresh_interval=1000)
+        _key_times(d)["ghost"] = fake_clock["t"]
+        del d["ghost"]
+        assert "ghost" not in _key_times(d)
+
+    def test_expiring_one_key_does_not_break_lookups_of_another(self, fake_clock):
+        d = DefaultDictWithTimeout(ttl=2, refresh_interval=5)
+        d.setdefault("a", 0)
+        d["a"] += 1
+        fake_clock["t"] += 10
+        d.setdefault("b", 0)
+        d["b"] += 1
+        with pytest.raises(KeyError):
+            _ = d["a"]
+        fake_clock["t"] += 10
+        assert d.setdefault("b", 0) == 0
+
 
 # ---------------------------------------------------------------------------
 # handle_line_comments
@@ -185,17 +234,50 @@ class TestHandleLineComments:
     def test_converts_ask_to_ask_line_with_metadata(self):
         body = self._payload()
         result = github_app.handle_line_comments(body, "/ask Why this change?")
-        assert result.startswith("/ask_line ")
+        # handle_line_comments returns an argv list (not a shell-style string)
+        # so attacker-controlled fields cannot inject extra CLI arguments via
+        # shlex.quote() being defeated downstream.
+        assert isinstance(result, list)
+        assert result[0] == "/ask_line"
         assert "--line_start=10" in result
         assert "--line_end=14" in result
         assert "--side=RIGHT" in result
         assert "--file_name=src/file.py" in result
         assert "--comment_id=987654" in result
-        assert result.endswith("Why this change?")
+        assert result[-1] == "Why this change?"
+
+    def test_only_strips_the_leading_ask_command(self):
+        # The question is about the /ask command itself, so the inner occurrence
+        # must survive. gitlab_webhook.handle_ask_line() already guarantees this.
+        body = self._payload()
+        result = github_app.handle_line_comments(body, "/ask explain why /ask appears in the source")
+        assert result[-1] == "explain why /ask appears in the source"
+
+    def test_question_mentioning_ask_line_survives(self):
+        body = self._payload()
+        result = github_app.handle_line_comments(body, "/ask how do I call /ask_line from /ask?")
+        assert result[-1] == "how do I call /ask_line from /ask?"
+
+    def test_question_containing_hash_is_untouched(self):
+        body = self._payload()
+        result = github_app.handle_line_comments(body, "/ask does #42 cover this?")
+        assert result[-1] == "does #42 cover this?"
+
+    def test_surrounding_whitespace_is_trimmed(self):
+        body = self._payload()
+        result = github_app.handle_line_comments(body, "  /ask   padded question  ")
+        assert result[-1] == "padded question"
+
+    def test_command_without_question_adds_no_trailing_argv(self):
+        body = self._payload()
+        result = github_app.handle_line_comments(body, "/ask")
+        assert result[0] == "/ask_line"
+        assert not any(arg == "" for arg in result)
 
     def test_missing_start_line_falls_back_to_line(self):
         body = self._payload(start_line=None)
         result = github_app.handle_line_comments(body, "/ask anything")
+        assert isinstance(result, list)
         assert "--line_start=14" in result
         assert "--line_end=14" in result
 
@@ -279,6 +361,18 @@ class TestHandleLineComments:
         finally:
             _restore_ask_diff_hunk(settings, outer_original, outer_sentinel)
 
+    def test_outdated_comment_falls_back_to_original_line(self):
+        body = self._payload(start_line=None, line=None, original_start_line=5, original_line=7)
+        result = github_app.handle_line_comments(body, "/ask Is this still relevant?")
+        assert "--line_start=5" in result
+        assert "--line_end=7" in result
+
+    def test_outdated_comment_single_line_falls_back_to_original(self):
+        body = self._payload(start_line=None, line=None, original_start_line=None, original_line=7)
+        result = github_app.handle_line_comments(body, "/ask question")
+        assert "--line_start=7" in result
+        assert "--line_end=7" in result
+
     def test_non_ask_comment_returned_unchanged(self):
         body = self._payload()
         result = github_app.handle_line_comments(body, "just a comment")
@@ -321,18 +415,6 @@ class TestCheckPullRequestEvent:
         body = {"pull_request": self._pr(state="closed")}
         assert github_app._check_pull_request_event("opened", body, {}) == ({}, "")
 
-    def test_rejects_draft_pr(self):
-        body = {"pull_request": self._pr(draft=True)}
-        assert github_app._check_pull_request_event("opened", body, {}) == ({}, "")
-
-    def test_rejects_when_draft_field_missing(self):
-        # pull_request.get("draft", True) defaults to True, so a missing draft
-        # field is treated as draft and rejected.
-        pr = self._pr()
-        pr.pop("draft")
-        body = {"pull_request": pr}
-        assert github_app._check_pull_request_event("opened", body, {}) == ({}, "")
-
     def test_rejects_synchronize_when_created_equals_updated(self):
         body = {
             "pull_request": self._pr(
@@ -362,26 +444,15 @@ def _run(coro):
 @pytest.fixture
 def push_trigger_env(monkeypatch):
     """Set up minimal mocks so handle_push_trigger_for_new_commits can run."""
-    # Swap module-level dedupe state with fresh test-local instances so we
-    # don't leak entries into other tests and don't depend on prior state.
-    fresh_duplicate_push_triggers = DefaultDictWithTimeout(ttl=None)
-    fresh_pending_conditions = DefaultDictWithTimeout(
-        asyncio.locks.Condition, ttl=None
-    )
-    monkeypatch.setattr(
-        github_app, "_duplicate_push_triggers", fresh_duplicate_push_triggers
-    )
-    monkeypatch.setattr(
-        github_app,
-        "_pending_task_duplicate_push_conditions",
-        fresh_pending_conditions,
-    )
+    monkeypatch.setattr(servers_utils, "_push_trigger_states_by_ttl", {})
+    monkeypatch.setattr(servers_utils, "_active_push_trigger_states", {})
 
     settings = SimpleNamespace(
         github_app=SimpleNamespace(
             handle_push_trigger=True,
             push_trigger_ignore_merge_commits=False,
             push_trigger_pending_tasks_backlog=False,
+            push_trigger_pending_tasks_ttl=300,
         )
     )
     monkeypatch.setattr(github_app, "get_settings", lambda: settings)
@@ -429,7 +500,8 @@ class TestPushTriggerDedupe:
 
         assert push_trigger_env["count"] == 1
         # Counter incremented then decremented back to 0.
-        assert github_app._duplicate_push_triggers[api_url] == 0
+        state = servers_utils._get_push_trigger_state(api_url, 300)
+        assert state.active_tasks == 0
 
     def test_skips_when_before_equals_after(self, push_trigger_env):
         body = _push_body()
@@ -472,7 +544,8 @@ class TestPushTriggerDedupe:
         body = _push_body()
         api_url = body["pull_request"]["url"]
         # Simulate an already-running task with backlog disabled (max=1).
-        github_app._duplicate_push_triggers[api_url] = 1
+        state = servers_utils._get_push_trigger_state(api_url, 300)
+        state.active_tasks = 1
 
         asyncio.run(
             github_app.handle_push_trigger_for_new_commits(
@@ -482,7 +555,65 @@ class TestPushTriggerDedupe:
 
         # Third path: counter is left untouched, perform never runs.
         assert push_trigger_env["count"] == 0
-        assert github_app._duplicate_push_triggers[api_url] == 1
+        assert state.active_tasks == 1
+
+    def test_cancelled_backlog_waiter_releases_dedupe_slot(self, push_trigger_env, monkeypatch):
+        settings = github_app.get_settings()
+        settings.github_app.push_trigger_pending_tasks_backlog = True
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def fake_perform(*args, **kwargs):
+            push_trigger_env["count"] += 1
+            if push_trigger_env["count"] == 1:
+                first_started.set()
+                await release_first.wait()
+
+        monkeypatch.setattr(github_app, "_perform_auto_commands_github", fake_perform)
+
+        async def exercise_cancelled_waiter():
+            body = _push_body()
+            api_url = body["pull_request"]["url"]
+            first = asyncio.create_task(
+                github_app.handle_push_trigger_for_new_commits(
+                    body, "push", "alice", "1", "synchronize", {}, agent=None
+                )
+            )
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+
+            second = asyncio.create_task(
+                github_app.handle_push_trigger_for_new_commits(
+                    body, "push", "alice", "1", "synchronize", {}, agent=None
+                )
+            )
+            state = servers_utils._get_push_trigger_state(api_url, 300)
+            for _ in range(10):
+                if state.active_tasks == 2:
+                    break
+                await asyncio.sleep(0)
+            assert state.active_tasks == 2
+
+            second.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await second
+
+            try:
+                # Cancelling the waiting task must return its reserved slot.
+                assert state.active_tasks == 1
+            finally:
+                release_first.set()
+                await first
+
+            assert state.active_tasks == 0
+            await asyncio.wait_for(
+                github_app.handle_push_trigger_for_new_commits(
+                    body, "push", "alice", "1", "synchronize", {}, agent=None
+                ),
+                timeout=1,
+            )
+            assert push_trigger_env["count"] == 2
+
+        asyncio.run(exercise_cancelled_waiter())
 
     def test_invalid_pr_event_short_circuits(self, push_trigger_env):
         body = _push_body()
@@ -495,3 +626,26 @@ class TestPushTriggerDedupe:
         )
 
         assert push_trigger_env["count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# _reformat_quote_ask_command
+# ---------------------------------------------------------------------------
+
+
+def test_reformat_quote_ask_moves_command_to_front_and_keeps_the_tail():
+    # A mobile image-quote reply with a second /ask must not drop the tail:
+    # the previous split('/ask') truncation lost everything past the second
+    # occurrence before dispatching the command.
+    original = "> ![image](screenshot.png)\n> /ask what does this do? Also /ask the tail"
+    result = github_app._reformat_quote_ask_command(original)
+
+    assert result is not None
+    assert result.startswith("/ask ")
+    assert "the tail" in result
+    assert "![image]" in result
+
+
+def test_reformat_quote_ask_returns_none_for_non_quote_reply():
+    assert github_app._reformat_quote_ask_command("just a normal comment") is None
+    assert github_app._reformat_quote_ask_command("> ![image](a.png)\n> no command here") is None

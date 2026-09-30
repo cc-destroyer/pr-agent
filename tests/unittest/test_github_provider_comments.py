@@ -6,21 +6,23 @@ These tests use ``GithubProvider.__new__(GithubProvider)`` to bypass network-bou
 ``__init__`` and inject minimal fake collaborators. No real GitHub API access.
 """
 
+import json
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
+from github import GithubException
+from requests.exceptions import RequestException
 
 from pr_agent.git_providers import github_provider as gh_module
 from pr_agent.git_providers.github_provider import GithubProvider
 
 
-class _FakeGithubException(Exception):
-    """Mimics github.GithubException enough for the provider's ``e.status`` check."""
+class _FakeGithubException(GithubException):
+    """A real GithubException with a shorter constructor for the provider's ``e.status`` check."""
 
     def __init__(self, status, data=None):
-        super().__init__(f"GithubException status={status}")
-        self.status = status
-        self.data = data or {}
+        super().__init__(status, data or {}, {})
 
 
 class _FakePR:
@@ -31,9 +33,9 @@ class _FakePR:
         self._raise_on_first = raise_on_first
         self._calls = 0
 
-    def create_review(self, commit=None, comments=None):
+    def create_review(self, commit=None, event=None, comments=None):
         self._calls += 1
-        self.create_review_calls.append({"commit": commit, "comments": comments})
+        self.create_review_calls.append({"commit": commit, "event": event, "comments": comments})
         if self._raise_on_first is not None and self._calls == 1:
             exc = self._raise_on_first
             self._raise_on_first = None
@@ -51,6 +53,58 @@ def _make_provider(pr=None, max_chars=65000):
     p.diff_files = []
     p.base_url = "https://api.github.com"
     return p
+
+
+@pytest.mark.parametrize(
+    ("output", "max_chars", "expected"),
+    [
+        pytest.param("short", 10, "short", id="short"),
+        pytest.param("exact", 5, "exact", id="exact"),
+        pytest.param("x" * 20, 10, ("x" * 7) + "...", id="truncated"),
+        pytest.param("abcdef", -1, "", id="negative-limit"),
+        pytest.param("abcdef", 0, "", id="zero-limit"),
+        pytest.param("abcdef", 1, ".", id="one-character-limit"),
+        pytest.param("abcdef", 2, "..", id="two-character-limit"),
+        pytest.param("abcdef", 3, "...", id="three-character-limit"),
+        pytest.param("😀" * 5, 4, "😀...", id="unicode-code-points"),
+    ],
+)
+def test_limit_output_characters_respects_total_limit(output, max_chars, expected):
+    provider = _make_provider()
+
+    result = provider.limit_output_characters(output, max_chars)
+
+    assert result == expected
+    if max_chars >= 0:
+        assert len(result) <= max_chars
+
+
+def test_edit_comment_returns_false_on_github_failure():
+    provider = _make_provider()
+    comment = MagicMock()
+    comment.edit.side_effect = gh_module.GithubException(500, "edit failed", {})
+
+    assert provider.edit_comment(comment, "updated body") is False
+
+
+@pytest.mark.parametrize(
+    ("deployment_type", "agent_login", "comment_login", "expected"),
+    [
+        ("user", "pr-agent", "pr-agent", True),
+        ("user", "pr-agent", "human", False),
+        ("app", "review-app[bot]", "review-app[bot]", True),
+        ("app", "review-app[bot]", "review-app[bot]-human", False),
+    ],
+)
+def test_comment_authorship_uses_authenticated_github_identity(
+    deployment_type, agent_login, comment_login, expected
+):
+    provider = _make_provider()
+    provider.deployment_type = deployment_type
+    provider.github_user_id = agent_login
+    comment = SimpleNamespace(user=SimpleNamespace(login=comment_login))
+
+    assert provider.is_comment_authored_by_pr_agent(comment) is expected
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +196,8 @@ def test_create_inline_comment_limits_body_length(monkeypatch):
     payload = provider.create_inline_comment(long_body, "f.py", "line")
 
     assert payload["body"].endswith("...")
-    # limit_output_characters: output[:max_chars] + '...'
-    assert payload["body"] == "A" * 10 + "..."
+    assert payload["body"] == "A" * 7 + "..."
+    assert len(payload["body"]) == provider.max_comment_chars
 
 
 def test_create_inline_comment_does_not_truncate_short_body(monkeypatch):
@@ -282,6 +336,7 @@ def test_publish_code_suggestions_multi_line_payload_shape():
 
     def capture(comments, disable_fallback=False):
         captured["comments"] = comments
+        return True
 
     provider.publish_inline_comments = capture
 
@@ -296,6 +351,11 @@ def test_publish_code_suggestions_multi_line_payload_shape():
 
     assert "comments" in captured
     payload = captured["comments"][0]
+    # publish_code_suggestions attaches an internal '_dedup_code_fp' fingerprint that
+    # publish_inline_comments consumes and strips before the GitHub API call; it is not
+    # part of the API payload shape under test, so drop it before comparing.
+    assert "_dedup_code_fp" in payload
+    payload = {key: value for key, value in payload.items() if key != "_dedup_code_fp"}
     assert payload == {
         "body": "```suggestion\nnew\n```",
         "path": "src/foo.py",
@@ -325,6 +385,11 @@ def test_publish_code_suggestions_single_line_payload_shape():
 
     assert provider.publish_code_suggestions(suggestions) is True
     payload = captured["c"][0]
+    # publish_code_suggestions attaches an internal '_dedup_code_fp' fingerprint that
+    # publish_inline_comments consumes and strips before the GitHub API call; it is not
+    # part of the API payload shape under test, so drop it before comparing.
+    assert "_dedup_code_fp" in payload
+    payload = {key: value for key, value in payload.items() if key != "_dedup_code_fp"}
     assert payload == {
         "body": "fix",
         "path": "src/foo.py",
@@ -365,7 +430,7 @@ def test_publish_code_suggestions_returns_false_on_publish_error():
     _stub_validation_passthrough(provider)
 
     def boom(comments, disable_fallback=False):
-        raise RuntimeError("nope")
+        raise RequestException("nope")
 
     provider.publish_inline_comments = boom
 
@@ -374,3 +439,578 @@ def test_publish_code_suggestions_returns_false_on_publish_error():
         "relevant_lines_start": 1, "relevant_lines_end": 2,
     }])
     assert result is False
+
+
+def test_publish_code_suggestions_422_fallback_all_dropped_returns_false(monkeypatch):
+    """Regression test for #3223: When the 422 fallback drops all comments
+    (0 verified, 0 repaired), publish_code_suggestions must return False so caller
+    can trigger retry logic."""
+    fake_pr = _FakePR(raise_on_first=_FakeGithubException(status=422))
+    provider = _make_provider(pr=fake_pr)
+    _stub_validation_passthrough(provider)
+
+    # All comments are rejected during verification
+    monkeypatch.setattr(
+        provider,
+        "_verify_code_comments",
+        lambda comments: ([], [(c, Exception("invalid")) for c in comments]),
+    )
+    # No invalid comment can be repaired
+    monkeypatch.setattr(
+        provider,
+        "_try_fix_invalid_inline_comments",
+        lambda invalid_list: [],
+    )
+
+    suggestions = [{
+        "body": "```suggestion\nsuggestion\n```",
+        "relevant_file": "src/foo.py",
+        "relevant_lines_start": 10,
+        "relevant_lines_end": 12,
+    }]
+
+    result = provider.publish_code_suggestions(suggestions)
+    assert result is False
+    # Only the initial failing create_review call occurred; 0 fallback comments posted
+    assert len(fake_pr.create_review_calls) == 1
+    assert provider.get_recent_inline_comment_bodies() == []
+
+
+def test_publish_code_suggestions_422_fallback_partial_success_returns_true(monkeypatch):
+    """When 422 fallback successfully publishes at least one comment, return True
+    to prevent duplicate comment creation by whole-batch retries."""
+    fake_pr = _FakePR(raise_on_first=_FakeGithubException(status=422))
+    provider = _make_provider(pr=fake_pr)
+    _stub_validation_passthrough(provider)
+
+    # 1 verified comment, 1 invalid comment
+    def fake_verify(comments):
+        return [comments[0]], [(comments[1], Exception("invalid"))]
+
+    monkeypatch.setattr(provider, "_verify_code_comments", fake_verify)
+    monkeypatch.setattr(provider, "_try_fix_invalid_inline_comments", lambda invalid_list: [])
+
+    suggestions = [
+        {
+            "body": "```suggestion\nfirst\n```",
+            "relevant_file": "src/foo.py",
+            "relevant_lines_start": 1,
+            "relevant_lines_end": 2,
+        },
+        {
+            "body": "```suggestion\nsecond\n```",
+            "relevant_file": "src/foo.py",
+            "relevant_lines_start": 5,
+            "relevant_lines_end": 6,
+        },
+    ]
+
+    result = provider.publish_code_suggestions(suggestions)
+    assert result is True
+    # 1 initial failed batch call, 1 successful fallback call with the verified comment
+    assert len(fake_pr.create_review_calls) == 2
+    assert len(fake_pr.create_review_calls[1]["comments"]) == 1
+    assert provider.get_recent_inline_comment_bodies() == ["```suggestion\nfirst\n```"]
+
+
+def test_publish_code_suggestions_422_fallback_repaired_comment_success(monkeypatch):
+    """When initial batch gets 422, verification rejects, but repairing succeeds and
+    individual publish succeeds, return True."""
+    fake_pr = _FakePR(raise_on_first=_FakeGithubException(status=422))
+    provider = _make_provider(pr=fake_pr)
+    _stub_validation_passthrough(provider)
+
+    settings = SimpleNamespace(
+        github=SimpleNamespace(try_fix_invalid_inline_comments=True),
+        get=lambda key, default=None: default,
+    )
+    monkeypatch.setattr(gh_module, "get_settings", lambda: settings)
+
+    monkeypatch.setattr(
+        provider,
+        "_verify_code_comments",
+        lambda comments: ([], [(comments[0], Exception("invalid"))]),
+    )
+    repaired = [{"body": "fixed single line", "path": "src/foo.py", "line": 10, "side": "RIGHT"}]
+    monkeypatch.setattr(provider, "_try_fix_invalid_inline_comments", lambda invalid: repaired)
+
+    suggestions = [{
+        "body": "```suggestion\nmulti\nline\n```",
+        "relevant_file": "src/foo.py",
+        "relevant_lines_start": 10,
+        "relevant_lines_end": 12,
+    }]
+
+    result = provider.publish_code_suggestions(suggestions)
+    assert result is True
+    # Call 1: initial batch -> raises 422
+    # Call 2: repaired comment via publish_inline_comments([comment], disable_fallback=True) -> succeeds
+    assert len(fake_pr.create_review_calls) == 2
+    assert fake_pr.create_review_calls[1]["comments"] == repaired
+    assert provider.get_recent_inline_comment_bodies() == ["fixed single line"]
+
+
+def test_publish_code_suggestions_422_fallback_repaired_comment_failure_returns_false(monkeypatch):
+    """When repaired payload is generated but publishing that repaired comment fails,
+    it must NOT count as published, and publish_code_suggestions must return False."""
+    fake_pr = _FakePR(raise_on_first=_FakeGithubException(status=422))
+    provider = _make_provider(pr=fake_pr)
+    _stub_validation_passthrough(provider)
+
+    settings = SimpleNamespace(
+        github=SimpleNamespace(try_fix_invalid_inline_comments=True),
+        get=lambda key, default=None: default,
+    )
+    monkeypatch.setattr(gh_module, "get_settings", lambda: settings)
+
+    monkeypatch.setattr(
+        provider,
+        "_verify_code_comments",
+        lambda comments: ([], [(comments[0], Exception("invalid"))]),
+    )
+    repaired = [{"body": "fixed single line", "path": "src/foo.py", "line": 10, "side": "RIGHT"}]
+    monkeypatch.setattr(provider, "_try_fix_invalid_inline_comments", lambda invalid: repaired)
+
+    calls = 0
+
+    def fail_repaired(commit=None, event=None, comments=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _FakeGithubException(status=422)
+        # with disable_fallback=True, this re-raises from publish_inline_comments
+        raise _FakeGithubException(status=422)
+
+    fake_pr.create_review = fail_repaired
+
+    suggestions = [{
+        "body": "```suggestion\nmulti\nline\n```",
+        "relevant_file": "src/foo.py",
+        "relevant_lines_start": 10,
+        "relevant_lines_end": 12,
+    }]
+
+    result = provider.publish_code_suggestions(suggestions)
+    assert result is False
+    assert calls == 2
+    assert provider.get_recent_inline_comment_bodies() == []
+
+
+def test_publish_code_suggestions_normal_success():
+    """Clean create_review call without 422 must return True."""
+    fake_pr = _FakePR()
+    provider = _make_provider(pr=fake_pr)
+    _stub_validation_passthrough(provider)
+
+    suggestions = [{
+        "body": "normal",
+        "relevant_file": "src/foo.py",
+        "relevant_lines_start": 1,
+        "relevant_lines_end": 1,
+    }]
+
+    result = provider.publish_code_suggestions(suggestions)
+    assert result is True
+    assert len(fake_pr.create_review_calls) == 1
+
+
+def test_persistent_dedup_all_skipped_returns_true(monkeypatch):
+    """When persistent_inline_comments is enabled and all comments are duplicates,
+    publish_inline_comments and publish_code_suggestions must return True without
+    calling create_review."""
+    fake_pr = _FakePR()
+    provider = _make_provider(pr=fake_pr)
+    _stub_validation_passthrough(provider)
+
+    settings = SimpleNamespace(
+        get=lambda key, default=None: True if key == "config.persistent_inline_comments" else default,
+        github=SimpleNamespace(try_fix_invalid_inline_comments=False),
+    )
+    monkeypatch.setattr(gh_module, "get_settings", lambda: settings)
+
+    store = MagicMock()
+    store.seen.return_value = True
+    monkeypatch.setattr(gh_module, "get_inline_comment_store", lambda prov: store)
+
+    comments = [{"path": "src/foo.py", "body": "already posted", "line": 5}]
+    res_inline = provider.publish_inline_comments(comments)
+    assert res_inline is True
+    assert len(fake_pr.create_review_calls) == 0
+
+    suggestions = [{
+        "body": "already posted",
+        "relevant_file": "src/foo.py",
+        "relevant_lines_start": 5,
+        "relevant_lines_end": 5,
+    }]
+    res_suggestions = provider.publish_code_suggestions(suggestions)
+    assert res_suggestions is True
+    assert len(fake_pr.create_review_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# resolve_comment_thread
+# ---------------------------------------------------------------------------
+
+
+def _make_graphql_response(data, errors=None):
+    """Build a tuple mimicking PyGitHub's requestJson return for GraphQL."""
+    body = {"data": data}
+    if errors:
+        body["errors"] = errors
+    return (200, {}, json.dumps(body))
+
+
+class _FakeRequester:
+    """Records GraphQL calls and returns canned responses."""
+
+    def __init__(self, responses):
+        self.calls = []
+        self._responses = list(responses)
+
+    def requestJsonAndCheck(self, method, url, input=None):
+        self.calls.append(("check", method, url, input))
+        return ({}, self._responses.pop(0))
+
+    def requestJson(self, method, url, input=None):
+        self.calls.append(("json", method, url, input))
+        return self._responses.pop(0)
+
+
+def _make_provider_with_graphql(rest_comment_data, graphql_responses):
+    """Build a provider wired with fake REST + GraphQL responses."""
+    p = GithubProvider.__new__(GithubProvider)
+    p.repo = "owner/repo"
+    p.pr_num = 42
+    p.base_url = "https://api.github.com"
+
+    all_responses = [rest_comment_data] + graphql_responses
+    requester = _FakeRequester(all_responses)
+    p.pr = SimpleNamespace(_requester=requester)
+    p.github_client = SimpleNamespace(_Github__requester=requester)
+    return p, requester
+
+
+def _make_threads_response(threads, has_next_page=False, end_cursor=None):
+    """Build a GraphQL response for reviewThreads with pageInfo."""
+    return _make_graphql_response({
+        "repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": has_next_page, "endCursor": end_cursor},
+            "nodes": threads,
+        }}},
+    })
+
+
+class TestResolveCommentThread:
+    def test_resolves_thread_successfully(self):
+        rest_data = {"node_id": "PRR_comment1"}
+        threads_response = _make_threads_response([
+            {"id": "PRRT_thread1", "isResolved": False,
+             "comments": {"nodes": [{"id": "PRR_comment1"}]}},
+        ])
+        resolve_response = _make_graphql_response({
+            "resolveReviewThread": {"thread": {"isResolved": True}},
+        })
+
+        provider, requester = _make_provider_with_graphql(
+            rest_data, [threads_response, resolve_response]
+        )
+        result = provider.resolve_comment_thread(123)
+
+        assert result is True
+        assert len(requester.calls) == 3
+        assert "resolveReviewThread" in requester.calls[2][3]["query"]
+
+    def test_already_resolved_thread_returns_true(self):
+        rest_data = {"node_id": "PRR_comment1"}
+        threads_response = _make_threads_response([
+            {"id": "PRRT_thread1", "isResolved": True,
+             "comments": {"nodes": [{"id": "PRR_comment1"}]}},
+        ])
+
+        provider, requester = _make_provider_with_graphql(
+            rest_data, [threads_response]
+        )
+        result = provider.resolve_comment_thread(123)
+
+        assert result is True
+        assert len(requester.calls) == 2
+
+    def test_handles_no_matching_thread(self):
+        rest_data = {"node_id": "PRR_commentX"}
+        threads_response = _make_threads_response([
+            {"id": "PRRT_thread1", "isResolved": False,
+             "comments": {"nodes": [{"id": "PRR_other"}]}},
+        ])
+
+        provider, requester = _make_provider_with_graphql(
+            rest_data, [threads_response]
+        )
+        result = provider.resolve_comment_thread(123)
+
+        assert result is False
+        assert len(requester.calls) == 2
+
+    def test_handles_missing_node_id(self):
+        rest_data = {}  # no node_id
+
+        provider, requester = _make_provider_with_graphql(rest_data, [])
+        result = provider.resolve_comment_thread(123)
+
+        assert result is False
+        assert len(requester.calls) == 1
+
+    def test_handles_graphql_errors_in_resolve_mutation(self):
+        rest_data = {"node_id": "PRR_comment1"}
+        threads_response = _make_threads_response([
+            {"id": "PRRT_thread1", "isResolved": False,
+             "comments": {"nodes": [{"id": "PRR_comment1"}]}},
+        ])
+        error_response = _make_graphql_response(
+            {"resolveReviewThread": None},
+            errors=[{"message": "Insufficient permissions"}],
+        )
+
+        provider, requester = _make_provider_with_graphql(
+            rest_data, [threads_response, error_response]
+        )
+        result = provider.resolve_comment_thread(123)
+
+        assert result is False
+        assert len(requester.calls) == 3
+
+    def test_handles_resolve_returning_false(self):
+        rest_data = {"node_id": "PRR_comment1"}
+        threads_response = _make_threads_response([
+            {"id": "PRRT_thread1", "isResolved": False,
+             "comments": {"nodes": [{"id": "PRR_comment1"}]}},
+        ])
+        resolve_response = _make_graphql_response({
+            "resolveReviewThread": {"thread": {"isResolved": False}},
+        })
+
+        provider, requester = _make_provider_with_graphql(
+            rest_data, [threads_response, resolve_response]
+        )
+        result = provider.resolve_comment_thread(123)
+
+        assert result is False
+        assert len(requester.calls) == 3
+
+    def test_handles_unexpected_mutation_response_format(self):
+        """Mutation returns non-tuple — should return False, not fall through to True."""
+        rest_data = {"node_id": "PRR_comment1"}
+        threads_response = _make_threads_response([
+            {"id": "PRRT_thread1", "isResolved": False,
+             "comments": {"nodes": [{"id": "PRR_comment1"}]}},
+        ])
+
+        provider, requester = _make_provider_with_graphql(
+            rest_data, [threads_response, "not-a-tuple"]
+        )
+        result = provider.resolve_comment_thread(123)
+
+        assert result is False
+
+    def test_handles_null_data_in_mutation_response(self):
+        """Mutation body carries a null data field — should return False, not raise."""
+        rest_data = {"node_id": "PRR_comment1"}
+        threads_response = _make_threads_response([
+            {"id": "PRRT_thread1", "isResolved": False,
+             "comments": {"nodes": [{"id": "PRR_comment1"}]}},
+        ])
+
+        provider, requester = _make_provider_with_graphql(
+            rest_data, [threads_response, _make_graphql_response(None)]
+        )
+        result = provider.resolve_comment_thread(123)
+
+        assert result is False
+
+    def test_paginates_to_find_thread(self):
+        """Thread is on the second page — pagination must follow."""
+        rest_data = {"node_id": "PRR_comment1"}
+        page1 = _make_threads_response(
+            [{"id": "PRRT_other", "isResolved": False,
+              "comments": {"nodes": [{"id": "PRR_other"}]}}],
+            has_next_page=True, end_cursor="cursor1",
+        )
+        page2 = _make_threads_response([
+            {"id": "PRRT_target", "isResolved": False,
+             "comments": {"nodes": [{"id": "PRR_comment1"}]}},
+        ])
+        resolve_response = _make_graphql_response({
+            "resolveReviewThread": {"thread": {"isResolved": True}},
+        })
+
+        provider, requester = _make_provider_with_graphql(
+            rest_data, [page1, page2, resolve_response]
+        )
+        result = provider.resolve_comment_thread(123)
+
+        assert result is True
+        assert 'after: "cursor1"' in requester.calls[2][3]["query"]
+        assert "resolveReviewThread" in requester.calls[3][3]["query"]
+
+    def test_handles_rest_api_exception(self):
+        """REST call to fetch comment throws — should not propagate."""
+        p = GithubProvider.__new__(GithubProvider)
+        p.repo = "owner/repo"
+        p.pr_num = 42
+        p.base_url = "https://api.github.com"
+
+        class _BrokenRequester:
+            def requestJsonAndCheck(self, *a, **kw):
+                raise RequestException("network error")
+            def requestJson(self, *a, **kw):
+                raise RequestException("network error")
+
+        p.pr = SimpleNamespace(_requester=_BrokenRequester())
+        p.github_client = SimpleNamespace(_Github__requester=_BrokenRequester())
+
+        result = p.resolve_comment_thread(123)
+        assert result is False
+
+
+def test_app_comment_authorship_requires_grounded_identity_without_user_endpoint(monkeypatch):
+    provider = _make_provider()
+    provider.deployment_type = "app"
+    provider.github_user_id = ""
+
+    def fail_get_user():
+        raise AssertionError("installation tokens must not use /user")
+
+    provider.github_client = SimpleNamespace(get_user=fail_get_user)
+    settings = SimpleNamespace(
+        get=lambda key, default=None: (
+            "review-app" if key == "GITHUB.APP_NAME" else default
+        )
+    )
+    monkeypatch.setattr(gh_module, "get_settings", lambda: settings)
+
+    bot_comment = SimpleNamespace(
+        user=SimpleNamespace(login="review-app[bot]")
+    )
+    copied_marker_comment = SimpleNamespace(
+        user=SimpleNamespace(login="review-app-human")
+    )
+
+    assert provider.supports_review_finding_state() is False
+    with pytest.raises(RuntimeError, match="identity"):
+        provider.is_comment_authored_by_pr_agent(bot_comment)
+    with pytest.raises(RuntimeError, match="identity"):
+        provider.is_comment_authored_by_pr_agent(copied_marker_comment)
+
+
+def test_app_comment_authorship_uses_published_response_identity_when_app_name_is_stale(
+    monkeypatch,
+):
+    provider = _make_provider()
+    provider.deployment_type = "app"
+    provider.github_user_id = ""
+    response = SimpleNamespace(user=SimpleNamespace(login="actual-app[bot]"))
+    provider.pr = SimpleNamespace(
+        create_issue_comment=lambda _body: response,
+    )
+    provider.issue_main = None
+    provider.github_client = SimpleNamespace(
+        get_user=lambda: pytest.fail("installation tokens must not use /user")
+    )
+    settings = SimpleNamespace(
+        get=lambda key, default=None: (
+            "stale-app" if key == "GITHUB.APP_NAME" else default
+        )
+    )
+
+    monkeypatch.setattr(gh_module, "get_settings", lambda: settings)
+
+    assert provider.publish_comment("identity bootstrap") is response
+    assert provider.github_user_id == "actual-app[bot]"
+    actual_bot_comment = SimpleNamespace(
+        user=SimpleNamespace(login="actual-app[bot]")
+    )
+    stale_bot_comment = SimpleNamespace(
+        user=SimpleNamespace(login="stale-app[bot]")
+    )
+
+    assert provider.supports_review_finding_state() is True
+    assert provider.is_comment_authored_by_pr_agent(actual_bot_comment) is True
+    assert provider.is_comment_authored_by_pr_agent(stale_bot_comment) is False
+
+
+def test_user_comment_authorship_resolves_authenticated_user():
+    provider = _make_provider()
+    provider.deployment_type = "user"
+    provider.github_user_id = ""
+    provider.github_client = SimpleNamespace(
+        get_user=lambda: SimpleNamespace(raw_data={"login": "user-agent"})
+    )
+    comment = SimpleNamespace(user=SimpleNamespace(login="user-agent"))
+
+    assert provider.supports_review_finding_state() is True
+    assert provider.is_comment_authored_by_pr_agent(comment) is True
+
+
+def test_validate_comments_inside_hunks_preserves_backslashes_in_fallback_diff():
+    provider = _make_provider()
+    provider.get_diff_files = lambda: [
+        SimpleNamespace(
+            filename="src/example.py",
+            patch="@@ -10,2 +10,2 @@\n-old\n+new",
+            language="python",
+        )
+    ]
+    suggestion = {
+        "body": '**Suggestion:** preserve escapes\n```suggestion\npattern = r"\\1\\n\\\\x"\n```',
+        "relevant_file": "src/example.py",
+        "relevant_lines_start": 9,
+        "relevant_lines_end": 11,
+        "original_suggestion": {
+            "existing_code": 'pattern = r"\\1"',
+            "improved_code": 'pattern = r"\\1\\n\\\\x"',
+        },
+    }
+
+    validated = provider.validate_comments_inside_hunks([suggestion])
+    result = validated[0]
+
+    assert result["relevant_lines_start"] == 10
+    assert result["relevant_lines_end"] == 11
+    assert "```suggestion" not in result["body"]
+    assert "```diff" in result["body"]
+    assert r'-pattern = r"\1"' in result["body"]
+    assert r'+pattern = r"\1\n\\x"' in result["body"]
+
+
+def test_validate_comments_inside_hunks_does_not_partially_update_on_render_error(monkeypatch):
+    provider = _make_provider()
+    provider.get_diff_files = lambda: [
+        SimpleNamespace(
+            filename="src/example.py",
+            patch="@@ -10,2 +10,2 @@\n-old\n+new",
+            language="python",
+        )
+    ]
+    original_body = "```suggestion\nnew\n```"
+    suggestion = {
+        "body": original_body,
+        "relevant_file": "src/example.py",
+        "relevant_lines_start": 9,
+        "relevant_lines_end": 11,
+        "original_suggestion": {
+            "existing_code": "old",
+            "improved_code": "new",
+        },
+    }
+    monkeypatch.setattr(
+        gh_module.difflib,
+        "unified_diff",
+        MagicMock(side_effect=AttributeError("render failed")),
+    )
+
+    validated = provider.validate_comments_inside_hunks([suggestion])
+    result = validated[0]
+
+    assert result["relevant_lines_start"] == 9
+    assert result["relevant_lines_end"] == 11
+    assert result["body"] == original_body
